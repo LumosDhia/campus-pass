@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useState, type FormEvent } from "react";
-import type { DppMetadata } from "@campus-pass/shared";
+import { CAMPUS_PASS_JSONLD_CONTEXT, type DppMetadata } from "@campus-pass/shared";
 import { generateProgramCode, generateStudentId, generateWalletAddress } from "./generators";
 
 const ORCHESTRATOR_URL = process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ?? "http://localhost:4002";
@@ -173,7 +173,7 @@ export default function DashboardPage() {
     setResult(null);
 
     const metadata: DppMetadata = {
-      "@context": "https://schema.org",
+      "@context": CAMPUS_PASS_JSONLD_CONTEXT,
       "@type": "Person",
       gtin: form.program,
       serial: form.studentId,

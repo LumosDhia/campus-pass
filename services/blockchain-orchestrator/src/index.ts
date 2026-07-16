@@ -1,7 +1,7 @@
 import "dotenv/config";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import type { DppMetadata } from "@campus-pass/shared";
+import { CAMPUS_PASS_JSONLD_CONTEXT, type DppMetadata } from "@campus-pass/shared";
 import { publicClient, walletClient, requireContractAddress, soulboundTokenAbi } from "./chain.js";
 import { pinJson } from "./ipfs.js";
 import { cached, invalidate, statusCacheKey, recordCacheKey } from "./cache.js";
@@ -34,7 +34,7 @@ async function resolveTokenId(gtin: string, serial: string) {
 // Pins DPP JSON-LD metadata to IPFS without minting — used by the Enterprise
 // Portal to preview/validate metadata before committing an SBT on-chain.
 app.post<{ Body: DppMetadata }>("/metadata", async (request, reply) => {
-  const cid = await pinJson(request.body);
+  const cid = await pinJson({ ...request.body, "@context": CAMPUS_PASS_JSONLD_CONTEXT });
   return reply.send({ cid, uri: `ipfs://${cid}` });
 });
 
@@ -53,7 +53,7 @@ app.post<{ Body: MintBody }>("/mint", async (request, reply) => {
   const { gtin, serial, ownerAddress, metadata } = request.body;
   const address = requireContractAddress();
 
-  const cid = await pinJson(metadata);
+  const cid = await pinJson({ ...metadata, "@context": CAMPUS_PASS_JSONLD_CONTEXT });
   const tokenURI = `ipfs://${cid}`;
 
   const txHash = await walletClient.writeContract({
@@ -103,7 +103,7 @@ app.post<{ Body: BatchMintBody }>("/mint/batch", async (request, reply) => {
 
   for (const item of request.body.items) {
     try {
-      const cid = await pinJson(item.metadata);
+      const cid = await pinJson({ ...item.metadata, "@context": CAMPUS_PASS_JSONLD_CONTEXT });
       const tokenURI = `ipfs://${cid}`;
       const txHash = await walletClient.writeContract({
         address,
