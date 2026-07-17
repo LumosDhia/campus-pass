@@ -6,7 +6,8 @@ import { publicClient, walletClient, requireContractAddress, soulboundTokenAbi }
 import { pinJson } from "./ipfs.js";
 import { cached, invalidate, statusCacheKey, recordCacheKey } from "./cache.js";
 import { buildGs1DigitalLinkUri } from "./gs1.js";
-import { initDb, listPrograms, insertProgram, upsertStudent, setStudentActive, listStudents, insertClaim, listClaims } from "./db.js";
+import { requireServiceToken, verifyPassword } from "./auth.js";
+import { initDb, getRegistrarHash, listPrograms, insertProgram, upsertStudent, setStudentActive, listStudents, insertClaim, listClaims } from "./db.js";
 
 const PORT = Number(process.env.PORT ?? 4002);
 const app = Fastify({ logger: true });
@@ -19,6 +20,23 @@ await initDb();
 await app.register(cors, { origin: true });
 
 app.get("/health", async () => ({ status: "ok" }));
+
+// Called only by the portal's server-side login route, which holds the service token.
+app.post<{ Body: { username?: string; password?: string } }>(
+  "/registrar/login",
+  { preHandler: requireServiceToken },
+  async (request, reply) => {
+    const { username, password } = request.body ?? {};
+    if (!username || !password) {
+      return reply.code(400).send({ error: "username and password are required" });
+    }
+    const stored = await getRegistrarHash(username);
+    if (!verifyPassword(password, stored)) {
+      return reply.code(401).send({ error: "Invalid username or password" });
+    }
+    return reply.send({ username });
+  }
+);
 
 async function resolveTokenId(gtin: string, serial: string) {
   const address = requireContractAddress();

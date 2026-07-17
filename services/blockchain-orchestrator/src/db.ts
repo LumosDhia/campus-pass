@@ -61,12 +61,34 @@ export async function initDb() {
 
   await sql`CREATE INDEX IF NOT EXISTS claims_index_student ON claims_index (gtin, serial)`;
 
+  await sql`
+    CREATE TABLE IF NOT EXISTS registrar_users (
+      username TEXT PRIMARY KEY CHECK (username ~ '^[a-z0-9_-]{3,32}$'),
+      password_hash TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+
   for (const program of SEED_PROGRAMS) {
     await sql`
       INSERT INTO programs (code, name) VALUES (${program.code}, ${program.name})
       ON CONFLICT (code) DO NOTHING
     `;
   }
+}
+
+export async function getRegistrarHash(username: string): Promise<string | null> {
+  const rows = await sql<{ password_hash: string }[]>`
+    SELECT password_hash FROM registrar_users WHERE username = ${username}
+  `;
+  return rows[0]?.password_hash ?? null;
+}
+
+export async function upsertRegistrar(username: string, passwordHash: string): Promise<void> {
+  await sql`
+    INSERT INTO registrar_users (username, password_hash) VALUES (${username}, ${passwordHash})
+    ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash
+  `;
 }
 
 export interface ProgramRow {

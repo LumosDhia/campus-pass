@@ -8,7 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "backfill": "tsx scripts/backfill.ts"
+    "backfill": "tsx scripts/backfill.ts",
+    "create-registrar": "tsx scripts/create-registrar.ts"
   },
   "dependencies": {
     "@campus-pass/shared": "workspace:*",
