@@ -4,8 +4,17 @@ import { Fragment, useCallback, useEffect, useState, type FormEvent } from "reac
 import { CAMPUS_PASS_JSONLD_CONTEXT, type DppMetadata } from "@campus-pass/shared";
 import { generateProgramCode, generateStudentId, generateWalletAddress } from "./generators";
 
-const ORCHESTRATOR_URL = process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ?? "http://localhost:4002";
+const ORCHESTRATOR_URL = "/api/orchestrator";
 const STUDENT_PASSPORT_URL = process.env.NEXT_PUBLIC_STUDENT_PASSPORT_URL ?? "http://localhost:3000";
+
+async function api(path: string, init?: RequestInit) {
+  const res = await fetch(`${ORCHESTRATOR_URL}${path}`, init);
+  if (res.status === 401) {
+    window.location.assign("/login");
+    throw new Error("Not signed in");
+  }
+  return res;
+}
 
 const ADD_NEW = "__add_new__";
 const CURRENT_YEAR = new Date().getFullYear();
@@ -82,7 +91,7 @@ export default function DashboardPage() {
   // API), so it doesn't just silently disappear from the dropdown.
   const loadPrograms = useCallback(async () => {
     try {
-      const res = await fetch(`${ORCHESTRATOR_URL}/programs`, { cache: "no-store" });
+      const res = await api("/programs", { cache: "no-store" });
       const data = await res.json();
       setPrograms(data.programs ?? []);
     } catch {
@@ -108,7 +117,7 @@ export default function DashboardPage() {
   const loadRoster = useCallback(async () => {
     setRosterLoading(true);
     try {
-      const res = await fetch(`${ORCHESTRATOR_URL}/items`, { cache: "no-store" });
+      const res = await api("/items", { cache: "no-store" });
       const data = await res.json();
       setRoster(data.items ?? []);
     } catch {
@@ -139,11 +148,15 @@ export default function DashboardPage() {
   async function confirmNewProgram() {
     const name = newProgramName.trim() || newProgramCode;
     try {
-      await fetch(`${ORCHESTRATOR_URL}/programs`, {
+      const res = await api("/programs", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ code: newProgramCode, name }),
       });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error ?? `Failed to add program (${res.status})`);
+      }
       setPrograms((current) => [...current, { code: newProgramCode, name }]);
       setForm((f) => ({ ...f, program: newProgramCode }));
     } catch (err) {
@@ -183,7 +196,7 @@ export default function DashboardPage() {
     };
 
     try {
-      const res = await fetch(`${ORCHESTRATOR_URL}/mint`, {
+      const res = await api("/mint", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -207,11 +220,16 @@ export default function DashboardPage() {
     }
   }
 
+  async function signOut() {
+    await fetch("/api/logout", { method: "POST" });
+    window.location.assign("/login");
+  }
+
   async function submitClaim(entry: RosterEntry) {
     if (!claimForm.label || !claimForm.value) return;
     setClaimSubmitting(true);
     try {
-      const res = await fetch(`${ORCHESTRATOR_URL}/sbt/${entry.gtin}/${entry.serial}/claims`, {
+      const res = await api(`/sbt/${entry.gtin}/${entry.serial}/claims`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(claimForm),
@@ -231,7 +249,12 @@ export default function DashboardPage() {
 
   return (
     <main className="shell">
-      <p className="eyebrow">CampusPass</p>
+      <div className="top-bar">
+        <p className="eyebrow">CampusPass</p>
+        <button className="btn-secondary" onClick={signOut}>
+          Sign out
+        </button>
+      </div>
       <h1>Student Affairs Portal</h1>
       <p>Enroll a student — this pins their passport to IPFS and mints their non-transferable campus credential.</p>
 
