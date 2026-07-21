@@ -14,29 +14,31 @@ const app = Fastify({ logger: true });
 
 await initDb();
 
-// Permissive for local dev only — the Enterprise Portal and DPP Portal call this
-// service directly from the browser. Tighten to an explicit origin allowlist
-// before this is ever exposed beyond localhost.
+// Permissive for local dev only — the Student Passport calls the read endpoints
+// directly from the browser (writes come from the portal's server and need the
+// service token). Tighten to an explicit origin allowlist before this is ever
+// exposed beyond localhost.
 await app.register(cors, { origin: true });
+
+app.addHook("onRequest", async (request, reply) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return;
+  return requireServiceToken(request, reply);
+});
 
 app.get("/health", async () => ({ status: "ok" }));
 
 // Called only by the portal's server-side login route, which holds the service token.
-app.post<{ Body: { username?: string; password?: string } }>(
-  "/registrar/login",
-  { preHandler: requireServiceToken },
-  async (request, reply) => {
-    const { username, password } = request.body ?? {};
-    if (!username || !password) {
-      return reply.code(400).send({ error: "username and password are required" });
-    }
-    const stored = await getRegistrarHash(username);
-    if (!verifyPassword(password, stored)) {
-      return reply.code(401).send({ error: "Invalid username or password" });
-    }
-    return reply.send({ username });
+app.post<{ Body: { username?: string; password?: string } }>("/registrar/login", async (request, reply) => {
+  const { username, password } = request.body ?? {};
+  if (!username || !password) {
+    return reply.code(400).send({ error: "username and password are required" });
   }
-);
+  const stored = await getRegistrarHash(username);
+  if (!verifyPassword(password, stored)) {
+    return reply.code(401).send({ error: "Invalid username or password" });
+  }
+  return reply.send({ username });
+});
 
 async function resolveTokenId(gtin: string, serial: string) {
   const address = requireContractAddress();
