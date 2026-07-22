@@ -31,6 +31,9 @@ interface RosterEntry {
   gtin: string; // program code
   serial: string; // student ID
   tokenURI: string;
+  givenName?: string | null;
+  familyName?: string | null;
+  notes?: string | null;
 }
 
 interface EnrollResult {
@@ -51,7 +54,9 @@ function freshForm() {
     program: "",
     studentId: "",
     walletAddress: "",
-    name: "",
+    givenName: "",
+    familyName: "",
+    email: "",
     signupYear: String(CURRENT_YEAR),
     notes: "",
   };
@@ -190,8 +195,7 @@ export default function DashboardPage() {
       "@type": "Person",
       gtin: form.program,
       serial: form.studentId,
-      name: form.name,
-      description: form.notes || undefined,
+      name: form.studentId,
       origin: form.signupYear,
     };
 
@@ -204,6 +208,12 @@ export default function DashboardPage() {
           serial: form.studentId,
           ownerAddress: form.walletAddress,
           metadata,
+          details: {
+            givenName: form.givenName,
+            familyName: form.familyName,
+            email: form.email,
+            notes: form.notes || undefined,
+          },
         }),
       });
       const data = await res.json();
@@ -256,7 +266,7 @@ export default function DashboardPage() {
         </button>
       </div>
       <h1>Student Affairs Portal</h1>
-      <p>Enroll a student — this pins their passport to IPFS and mints their non-transferable campus credential.</p>
+      <p>Enroll a student — this pins their pseudonymous passport to IPFS and mints their non-transferable campus credential.</p>
 
       <form className="card" onSubmit={handleSubmit}>
         <div className="row">
@@ -355,9 +365,20 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        <div className="row">
+          <div className="field">
+            <label htmlFor="givenName">Given name</label>
+            <input id="givenName" className="input" required value={form.givenName} onChange={updateField("givenName")} />
+          </div>
+          <div className="field">
+            <label htmlFor="familyName">Family name</label>
+            <input id="familyName" className="input" required value={form.familyName} onChange={updateField("familyName")} />
+          </div>
+        </div>
+
         <div className="field">
-          <label htmlFor="name">Student name</label>
-          <input id="name" className="input" required value={form.name} onChange={updateField("name")} />
+          <label htmlFor="email">Email</label>
+          <input id="email" className="input" type="email" required value={form.email} onChange={updateField("email")} />
         </div>
 
         <div className="row">
@@ -374,7 +395,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="field">
-          <label htmlFor="notes">Notes</label>
+          <label htmlFor="notes">Private notes (registrar only, never published)</label>
           <textarea id="notes" className="input" rows={3} value={form.notes} onChange={updateField("notes")} />
         </div>
 
@@ -404,6 +425,7 @@ export default function DashboardPage() {
           <table>
             <thead>
               <tr>
+                <th>Student</th>
                 <th>Program</th>
                 <th>Student ID</th>
                 <th>Credential</th>
@@ -415,6 +437,11 @@ export default function DashboardPage() {
               {roster.map((entry) => (
                 <Fragment key={entry.tokenId}>
                   <tr>
+                    {entry.givenName && entry.familyName ? (
+                      <td>{`${entry.givenName} ${entry.familyName}`}</td>
+                    ) : (
+                      <td className="mono">{entry.serial}</td>
+                    )}
                     <td className="mono">{entry.gtin}</td>
                     <td className="mono">{entry.serial}</td>
                     <td>{entry.tokenId}</td>
@@ -444,7 +471,8 @@ export default function DashboardPage() {
                   </tr>
                   {claimTarget === entry.tokenId && (
                     <tr>
-                      <td colSpan={5} style={{ background: "var(--bg)" }}>
+                      <td colSpan={6} style={{ background: "var(--bg)" }}>
+                        {entry.notes && <p className="muted">{entry.notes}</p>}
                         <div className="row" style={{ padding: "10px 0" }}>
                           <div className="field" style={{ marginBottom: 0 }}>
                             <input

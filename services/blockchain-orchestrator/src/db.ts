@@ -41,10 +41,25 @@ export async function initDb() {
       token_id TEXT NOT NULL,
       owner_address TEXT NOT NULL,
       token_uri TEXT,
-      name TEXT,
       active BOOLEAN NOT NULL DEFAULT true,
       minted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (gtin, serial)
+    )
+  `;
+
+  await sql`ALTER TABLE students_index DROP COLUMN IF EXISTS name`;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS enrollment_details (
+      gtin TEXT NOT NULL,
+      serial TEXT NOT NULL,
+      given_name TEXT NOT NULL,
+      family_name TEXT NOT NULL,
+      email TEXT CHECK (email IS NULL OR email ~ '^[^@\\s]+@[^@\\s]+$'),
+      notes TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (gtin, serial),
+      FOREIGN KEY (gtin, serial) REFERENCES students_index (gtin, serial) ON DELETE CASCADE
     )
   `;
 
@@ -113,16 +128,14 @@ export async function upsertStudent(row: {
   tokenId: string;
   ownerAddress: string;
   tokenURI?: string;
-  name?: string;
 }): Promise<void> {
   await sql`
-    INSERT INTO students_index (gtin, serial, token_id, owner_address, token_uri, name, active)
-    VALUES (${row.gtin}, ${row.serial}, ${row.tokenId}, ${row.ownerAddress}, ${row.tokenURI ?? null}, ${row.name ?? null}, true)
+    INSERT INTO students_index (gtin, serial, token_id, owner_address, token_uri, active)
+    VALUES (${row.gtin}, ${row.serial}, ${row.tokenId}, ${row.ownerAddress}, ${row.tokenURI ?? null}, true)
     ON CONFLICT (gtin, serial) DO UPDATE SET
       token_id = EXCLUDED.token_id,
       owner_address = EXCLUDED.owner_address,
-      token_uri = EXCLUDED.token_uri,
-      name = EXCLUDED.name
+      token_uri = EXCLUDED.token_uri
   `;
 }
 
@@ -136,13 +149,71 @@ export interface StudentIndexRow {
   token_id: string;
   owner_address: string;
   token_uri: string | null;
-  name: string | null;
   active: boolean;
   minted_at: Date;
 }
 
 export async function listStudents(): Promise<StudentIndexRow[]> {
   return sql<StudentIndexRow[]>`SELECT * FROM students_index ORDER BY minted_at DESC`;
+}
+
+export async function setStudentTokenUri(gtin: string, serial: string, tokenURI: string): Promise<void> {
+  await sql`UPDATE students_index SET token_uri = ${tokenURI} WHERE gtin = ${gtin} AND serial = ${serial}`;
+}
+
+export interface EnrollmentDetails {
+  gtin: string;
+  serial: string;
+  givenName: string;
+  familyName: string;
+  email: string | null;
+  notes: string | null;
+}
+
+export async function upsertEnrollmentDetails(row: EnrollmentDetails, { overwrite }: { overwrite: boolean }): Promise<void> {
+  if (overwrite) {
+    await sql`
+      INSERT INTO enrollment_details (gtin, serial, given_name, family_name, email, notes)
+      VALUES (${row.gtin}, ${row.serial}, ${row.givenName}, ${row.familyName}, ${row.email}, ${row.notes})
+      ON CONFLICT (gtin, serial) DO UPDATE SET
+        given_name = EXCLUDED.given_name,
+        family_name = EXCLUDED.family_name,
+        email = EXCLUDED.email,
+        notes = EXCLUDED.notes,
+        updated_at = now()
+    `;
+  } else {
+    await sql`
+      INSERT INTO enrollment_details (gtin, serial, given_name, family_name, email, notes)
+      VALUES (${row.gtin}, ${row.serial}, ${row.givenName}, ${row.familyName}, ${row.email}, ${row.notes})
+      ON CONFLICT (gtin, serial) DO NOTHING
+    `;
+  }
+}
+
+export async function getEnrollmentDetails(gtin: string, serial: string): Promise<EnrollmentDetails | null> {
+  const rows = await sql<{ given_name: string; family_name: string; email: string | null; notes: string | null }[]>`
+    SELECT given_name, family_name, email, notes FROM enrollment_details
+    WHERE gtin = ${gtin} AND serial = ${serial}
+  `;
+  const row = rows[0];
+  if (!row) return null;
+  return { gtin, serial, givenName: row.given_name, familyName: row.family_name, email: row.email, notes: row.notes };
+}
+
+export interface StudentWithDetailsRow extends StudentIndexRow {
+  given_name: string | null;
+  family_name: string | null;
+  email: string | null;
+  notes: string | null;
+}
+
+export async function listStudentsWithDetails(): Promise<StudentWithDetailsRow[]> {
+  return sql<StudentWithDetailsRow[]>`
+    SELECT s.*, d.given_name, d.family_name, d.email, d.notes
+    FROM students_index s LEFT JOIN enrollment_details d USING (gtin, serial)
+    ORDER BY s.minted_at DESC
+  `;
 }
 
 export async function insertClaim(gtin: string, serial: string, label: string, value: string): Promise<void> {

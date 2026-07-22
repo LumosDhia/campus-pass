@@ -6,8 +6,8 @@ import { publicClient, walletClient, requireContractAddress, soulboundTokenAbi }
 import { pinJson } from "./ipfs.js";
 import { cached, invalidate, statusCacheKey, recordCacheKey } from "./cache.js";
 import { buildGs1DigitalLinkUri } from "./gs1.js";
-import { requireServiceToken, verifyPassword } from "./auth.js";
-import { initDb, getRegistrarHash, listPrograms, insertProgram, upsertStudent, setStudentActive, listStudents, insertClaim, listClaims } from "./db.js";
+import { hasServiceToken, requireServiceToken, verifyPassword } from "./auth.js";
+import { initDb, getRegistrarHash, listPrograms, insertProgram, upsertStudent, setStudentActive, listStudents, listStudentsWithDetails, upsertEnrollmentDetails, getEnrollmentDetails, insertClaim, listClaims, type StudentIndexRow, type StudentWithDetailsRow } from "./db.js";
 
 const PORT = Number(process.env.PORT ?? 4002);
 const app = Fastify({ logger: true });
@@ -54,15 +54,46 @@ async function resolveTokenId(gtin: string, serial: string) {
 // Pins DPP JSON-LD metadata to IPFS without minting — used by the Enterprise
 // Portal to preview/validate metadata before committing an SBT on-chain.
 app.post<{ Body: DppMetadata }>("/metadata", async (request, reply) => {
+  const problem = personMetadataProblem(request.body, request.body.serial);
+  if (problem) return reply.code(400).send({ error: problem });
   const cid = await pinJson({ ...request.body, "@context": CAMPUS_PASS_JSONLD_CONTEXT });
   return reply.send({ cid, uri: `ipfs://${cid}` });
 });
+
+interface EnrollmentDetailsBody {
+  givenName: string;
+  familyName: string;
+  email: string;
+  notes?: string;
+}
 
 interface MintBody {
   gtin: string;
   serial: string;
   ownerAddress: `0x${string}`;
   metadata: DppMetadata;
+  details: EnrollmentDetailsBody;
+}
+
+// Person metadata is pinned to a public network forever, so it may carry
+// neither a real name nor free text.
+function personMetadataProblem(metadata: DppMetadata, serial: string): string | null {
+  if (metadata["@type"] !== "Person") return null;
+  if (metadata.name !== serial) return "Person metadata must not carry a real name; name must equal serial";
+  if (metadata.description !== undefined) return "Person metadata must not carry free text; put notes in details.notes";
+  return null;
+}
+
+function detailsProblem(details: EnrollmentDetailsBody | undefined): string | null {
+  if (!details?.givenName || !details.familyName || !details.email) {
+    return "details.givenName, details.familyName and details.email are required";
+  }
+  if (!/^[^@\s]+@[^@\s]+$/.test(details.email)) return "details.email is not a valid email address";
+  return null;
+}
+
+function validateMint(body: MintBody): string | null {
+  return detailsProblem(body.details) ?? personMetadataProblem(body.metadata, body.serial);
 }
 
 // Pins metadata, then mints the Soulbound Token referencing it (HLD §2.1.3).
@@ -70,7 +101,9 @@ app.post<{ Body: MintBody }>("/mint", async (request, reply) => {
   if (!walletClient) {
     return reply.code(500).send({ error: "ORCHESTRATOR_PRIVATE_KEY is not configured" });
   }
-  const { gtin, serial, ownerAddress, metadata } = request.body;
+  const { gtin, serial, ownerAddress, metadata, details } = request.body;
+  const problem = validateMint(request.body);
+  if (problem) return reply.code(400).send({ error: problem });
   const address = requireContractAddress();
 
   const cid = await pinJson({ ...metadata, "@context": CAMPUS_PASS_JSONLD_CONTEXT });
@@ -92,7 +125,11 @@ app.post<{ Body: MintBody }>("/mint", async (request, reply) => {
     args: [gtin, serial],
   });
 
-  await upsertStudent({ gtin, serial, tokenId: tokenId.toString(), ownerAddress, tokenURI, name: metadata.name });
+  await upsertStudent({ gtin, serial, tokenId: tokenId.toString(), ownerAddress, tokenURI });
+  await upsertEnrollmentDetails(
+    { gtin, serial, givenName: details.givenName, familyName: details.familyName, email: details.email, notes: details.notes || null },
+    { overwrite: true }
+  );
 
   return reply.send({
     tokenId: tokenId.toString(),
@@ -123,6 +160,8 @@ app.post<{ Body: BatchMintBody }>("/mint/batch", async (request, reply) => {
 
   for (const item of request.body.items) {
     try {
+      const problem = validateMint(item);
+      if (problem) throw new Error(problem);
       const cid = await pinJson({ ...item.metadata, "@context": CAMPUS_PASS_JSONLD_CONTEXT });
       const tokenURI = `ipfs://${cid}`;
       const txHash = await walletClient.writeContract({
@@ -144,8 +183,18 @@ app.post<{ Body: BatchMintBody }>("/mint/batch", async (request, reply) => {
         tokenId: tokenId.toString(),
         ownerAddress: item.ownerAddress,
         tokenURI,
-        name: item.metadata.name,
       });
+      await upsertEnrollmentDetails(
+        {
+          gtin: item.gtin,
+          serial: item.serial,
+          givenName: item.details.givenName,
+          familyName: item.details.familyName,
+          email: item.details.email,
+          notes: item.details.notes || null,
+        },
+        { overwrite: true }
+      );
 
       results.push({
         gtin: item.gtin,
@@ -258,20 +307,63 @@ app.post<{ Params: { gtin: string; serial: string }; Body: SetActiveBody }>(
 // Backs the Student Affairs Portal's roster view. Reads the Postgres index
 // (written on every mint/revoke) instead of replaying every Minted event from
 // block 0 — the chain stays authoritative, this is just a fast read cache.
-app.get("/items", async (_request, reply) => {
-  const rows = await listStudents();
+app.get("/items", async (request, reply) => {
+  const auth = hasServiceToken(request);
+  if (auth === "invalid") {
+    return reply.code(401).send({ error: "Missing or invalid service token" });
+  }
+
+  const rows: Array<StudentIndexRow | StudentWithDetailsRow> =
+    auth === "valid" ? await listStudentsWithDetails() : await listStudents();
   const items = rows.map((row) => ({
     tokenId: row.token_id,
     owner: row.owner_address,
     gtin: row.gtin,
     serial: row.serial,
     tokenURI: row.token_uri,
-    name: row.name,
     active: row.active,
+    ...("given_name" in row && {
+      givenName: row.given_name,
+      familyName: row.family_name,
+      email: row.email,
+      notes: row.notes,
+    }),
   }));
 
   return reply.send({ items });
 });
+
+app.get<{ Params: { gtin: string; serial: string } }>(
+  "/enrollments/:gtin/:serial/details",
+  { preHandler: requireServiceToken },
+  async (request, reply) => {
+    const { gtin, serial } = request.params;
+    const details = await getEnrollmentDetails(gtin, serial);
+    if (!details) {
+      return reply.code(404).send({ error: "No enrollment details on file" });
+    }
+    const { givenName, familyName, email, notes } = details;
+    return reply.send({ givenName, familyName, email, notes });
+  }
+);
+
+// The only way to add an email for legacy students, whose details come from the scrub script.
+app.put<{ Params: { gtin: string; serial: string }; Body: EnrollmentDetailsBody }>(
+  "/enrollments/:gtin/:serial/details",
+  async (request, reply) => {
+    const { gtin, serial } = request.params;
+    const students = await listStudents();
+    if (!students.some((row) => row.gtin === gtin && row.serial === serial)) {
+      return reply.code(404).send({ error: "No student enrolled with this identifier" });
+    }
+    const problem = detailsProblem(request.body);
+    if (problem) return reply.code(400).send({ error: problem });
+
+    const { givenName, familyName, email, notes } = request.body;
+    await upsertEnrollmentDetails({ gtin, serial, givenName, familyName, email, notes: notes || null }, { overwrite: true });
+    return reply.send({ givenName, familyName, email, notes: notes || null });
+  }
+);
 
 // Programs have no on-chain representation (a program code is just the gtin
 // half of a student's identifier pair) — this is the one thing Postgres is the
