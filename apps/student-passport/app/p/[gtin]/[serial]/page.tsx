@@ -162,7 +162,7 @@ export default async function PassportPage({
         </span>
       </div>
 
-      <h1>{metadata.name}</h1>
+      <h1>{isPerson ? `${t.identity} ${serial}` : metadata.name}</h1>
       <span className={`badge ${record.active ? "badge-active" : "badge-inactive"}`}>
         {record.active ? (isPerson ? t.enrolled : t.active) : isPerson ? t.notEnrolled : t.revoked}
       </span>
