@@ -9,6 +9,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "backfill": "tsx scripts/backfill.ts",
+    "scrub-pii": "tsx scripts/scrub-pii.ts",
     "create-registrar": "tsx scripts/create-registrar.ts"
   },
   "dependencies": {
