@@ -1,0 +1,52 @@
+# Local Moodle for testing CampusPass SSO against a real auth_jwtsso install.
+# Own compose project so it can never touch other Moodle stacks on this machine.
+#
+# Credentials below are dev-only: this stack is bound to localhost and holds no real data.
+#
+# Moodle is on 8092, not 8091: the Mvp-Hub repo's Moodle stack already claims 8091,
+# so both can run side by side.
+name: campus-pass-moodle
+
+services:
+  mariadb:
+    # Bitnami moved its free images to bitnamilegacy in 2025; bitnami/* tags now need a subscription.
+    image: docker.io/bitnamilegacy/mariadb:latest
+    container_name: campus-pass-moodle-db
+    environment:
+      - ALLOW_EMPTY_PASSWORD=yes
+      - MARIADB_USER=bn_moodle
+      - MARIADB_DATABASE=bitnami_moodle
+      - MARIADB_CHARACTER_SET=utf8mb4
+      - MARIADB_COLLATE=utf8mb4_unicode_ci
+    volumes:
+      - moodle_db_data:/bitnami/mariadb
+
+  moodle:
+    image: docker.io/bitnamilegacy/moodle:latest
+    container_name: campus-pass-moodle
+    ports:
+      - "8092:8080"
+    environment:
+      - MOODLE_USERNAME=admin
+      - MOODLE_PASSWORD=CampusPass-local-1
+      - MOODLE_EMAIL=admin@campus-pass.local
+      - MOODLE_SITE_NAME=CampusPass Moodle (local)
+      - MOODLE_DATABASE_HOST=mariadb
+      - MOODLE_DATABASE_PORT_NUMBER=3306
+      - MOODLE_DATABASE_USER=bn_moodle
+      - MOODLE_DATABASE_NAME=bitnami_moodle
+      - ALLOW_EMPTY_PASSWORD=yes
+    # The container fetches the Auth Service's JWKS from the host (auth-service runs
+    # via pnpm dev, not in Docker), so it needs a name for the host gateway.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - moodle_app_data:/bitnami/moodle
+      - moodle_moodledata:/bitnami/moodledata
+    depends_on:
+      - mariadb
+
+volumes:
+  moodle_db_data:
+  moodle_app_data:
+  moodle_moodledata:
