@@ -10,6 +10,13 @@ const AUDIENCE = process.env.AUDIENCE ?? "https://moodle.local";
 const KEY_ID = process.env.KEY_ID ?? "hub-key-1";
 const SELF_URL = process.env.SELF_URL ?? `http://localhost:${PORT}`;
 const ORCHESTRATOR_URL = process.env.BLOCKCHAIN_ORCHESTRATOR_URL ?? "http://localhost:4002";
+const MOODLE_URL = process.env.MOODLE_URL ?? "http://localhost:8092";
+const MOODLE_ISSUER_URL = process.env.MOODLE_ISSUER_URL ?? `${SELF_URL}/moodle/authorize`;
+const ORCHESTRATOR_API_TOKEN = process.env.ORCHESTRATOR_API_TOKEN ?? "";
+if (!ORCHESTRATOR_API_TOKEN) {
+  throw new Error("ORCHESTRATOR_API_TOKEN is required");
+}
+const SSO_PENDING_COOKIE = "cp_sso_pending";
 const DEFAULT_SSO_TARGET = process.env.MOODLE_TARGET_URL ?? "http://localhost:5055/moodle-callback";
 
 // Role/course access is an enrollment fact, not something a scanned link or a
@@ -62,7 +69,11 @@ type IssueResult =
 // owner — never trusted from client input — otherwise anyone could request a
 // JWT claiming to be any wallet, which would defeat the point of gating on
 // on-chain ownership at all.
-async function issueJwt(gtin: string, serial: string, role: string, coursePermissions: string[]): Promise<IssueResult> {
+type RecordResult =
+  | { ok: true; record: SbtRecord }
+  | { ok: false; status: number; error: string };
+
+async function fetchActiveRecord(gtin: string, serial: string): Promise<RecordResult> {
   const recordRes = await fetch(`${ORCHESTRATOR_URL}/sbt/${encodeURIComponent(gtin)}/${encodeURIComponent(serial)}`);
 
   if (recordRes.status === 404) {
@@ -76,6 +87,15 @@ async function issueJwt(gtin: string, serial: string, role: string, coursePermis
   if (!record.active) {
     return { ok: false, status: 403, error: "SBT is not active for this item" };
   }
+  return { ok: true, record };
+}
+
+async function issueJwt(gtin: string, serial: string, role: string, coursePermissions: string[]): Promise<IssueResult> {
+  const found = await fetchActiveRecord(gtin, serial);
+  if (!found.ok) {
+    return found;
+  }
+  const { record } = found;
 
   const claims: HubJwtClaims = {
     sub: record.owner,
@@ -154,6 +174,109 @@ app.get<{ Params: SsoLoginParams; Querystring: SsoLoginQuery }>("/sso/login/:gti
   const redirectUrl = new URL(target ?? DEFAULT_SSO_TARGET);
   redirectUrl.searchParams.set("token", result.token);
   return reply.redirect(redirectUrl.toString(), 302);
+});
+
+interface MoodleJwtClaims extends HubJwtClaims {
+  email: string;
+  given_name: string;
+  family_name: string;
+  nonce: string;
+}
+
+interface EnrollmentDetails {
+  givenName: string;
+  familyName: string;
+  email: string | null;
+}
+
+// Moodle's start.php discards everything but nonce/aud/redirect when it bounces the
+// browser to /moodle/authorize, so which student is signing in has to ride in a cookie
+// set on this origin. Cookies ignore ports, so it comes back on the return hop. The 300 s
+// life matches the plugin's noncelifetime.
+function readCookie(header: string | undefined, name: string): string | undefined {
+  for (const part of (header ?? "").split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) return rest.join("=");
+  }
+  return undefined;
+}
+const pendingCookie = (value: string, maxAge: number) =>
+  `${SSO_PENDING_COOKIE}=${value}; Path=/moodle; Max-Age=${maxAge}; HttpOnly; SameSite=Lax`;
+
+// SP-initiated bridge for Moodle's auth_jwtsso (the resolver's authenticate link points here).
+app.get<{ Params: SsoLoginParams; Querystring: { serial?: string } }>("/moodle/login/:gtin", async (request, reply) => {
+  const { gtin } = request.params;
+  const { serial } = request.query;
+  if (!gtin || !serial) {
+    return reply.code(400).send({ error: "gtin and serial are required" });
+  }
+  const pending = Buffer.from(JSON.stringify({ gtin, serial })).toString("base64url");
+  reply.header("set-cookie", pendingCookie(pending, 300));
+  return reply.redirect(`${MOODLE_URL}/auth/jwtsso/start.php`, 302);
+});
+
+// Moodle sends the browser here with its nonce; this URL is the plugin's `issuer`
+// setting and the JWT `iss` (compared as a string, never fetched).
+app.get<{ Querystring: { nonce?: string; aud?: string; redirect?: string } }>("/moodle/authorize", async (request, reply) => {
+  const { nonce, aud, redirect } = request.query;
+  const callbackUrl = `${MOODLE_URL}/auth/jwtsso/callback.php`;
+  if (!nonce || !/^[0-9a-f]{32}$/.test(nonce) || aud !== MOODLE_URL || redirect !== callbackUrl) {
+    return reply.code(400).send({ error: "Invalid authorize request" });
+  }
+
+  const raw = readCookie(request.headers.cookie, SSO_PENDING_COOKIE);
+  let pending: { gtin?: unknown; serial?: unknown } = {};
+  try {
+    pending = raw ? JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) : {};
+  } catch {
+    // falls through to the missing-cookie 400
+  }
+  if (typeof pending.gtin !== "string" || typeof pending.serial !== "string") {
+    return reply.code(400).send({ error: "No pending sign-in; start from the credential link" });
+  }
+  const { gtin, serial } = pending;
+  reply.header("set-cookie", pendingCookie("", 0));
+
+  const found = await fetchActiveRecord(gtin, serial);
+  if (!found.ok) {
+    return reply.code(found.status).send({ error: found.error });
+  }
+
+  const detailsRes = await fetch(
+    `${ORCHESTRATOR_URL}/enrollments/${encodeURIComponent(gtin)}/${encodeURIComponent(serial)}/details`,
+    { headers: { authorization: `Bearer ${ORCHESTRATOR_API_TOKEN}` } },
+  );
+  if (detailsRes.status !== 404 && !detailsRes.ok) {
+    return reply.code(502).send({ error: "Blockchain Orchestrator unavailable" });
+  }
+  const details = detailsRes.ok ? ((await detailsRes.json()) as EnrollmentDetails) : null;
+  if (!details?.email) {
+    return reply.code(409).send({ error: "No email on file for this student; ask Student Affairs to add one" });
+  }
+
+  const { role, coursePermissions } = lookupEnrollment(gtin);
+  const claims: MoodleJwtClaims = {
+    sub: found.record.owner,
+    gtin,
+    serial,
+    role,
+    course_permissions: coursePermissions,
+    email: details.email,
+    given_name: details.givenName,
+    family_name: details.familyName,
+    nonce,
+    iss: MOODLE_ISSUER_URL,
+    aud: MOODLE_URL,
+  };
+  const token = await new SignJWT({ ...claims })
+    .setProtectedHeader({ alg: "RS256", kid: keys.kid })
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(keys.privateKey);
+
+  const target = new URL(callbackUrl);
+  target.searchParams.set("token", token);
+  return reply.redirect(target.toString(), 302);
 });
 
 app.listen({ port: PORT, host: "0.0.0.0" }).catch((error) => {
