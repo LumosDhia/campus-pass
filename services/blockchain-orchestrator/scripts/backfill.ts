@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { publicClient, requireContractAddress, soulboundTokenAbi } from "../src/chain.js";
-import { initDb, upsertStudent, setStudentActive, resyncClaims } from "../src/db.js";
+import { initDb, upsertStudent, setStudentActive, resyncClaims, listPrograms } from "../src/db.js";
+import { syncProgramResolverEntry } from "../src/resolver.js";
 
 // One-time (but safe to re-run) sync from chain -> Postgres for anything minted
 // before students_index/claims_index existed. Ongoing writes since then already
@@ -43,6 +44,11 @@ async function main() {
     );
 
     console.log(`  synced ${gtin}/${serial} (token ${tokenId}, ${claims.length} claim(s), active=${active})`);
+  }
+
+  for (const program of await listPrograms()) {
+    await syncProgramResolverEntry(program.code, program.name);
+    console.log(`  resolver ${program.code} ok`);
   }
 
   console.log("Backfill complete.");

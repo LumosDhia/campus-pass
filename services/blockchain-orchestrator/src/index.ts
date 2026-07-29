@@ -6,6 +6,7 @@ import { publicClient, walletClient, requireContractAddress, soulboundTokenAbi }
 import { pinJson } from "./ipfs.js";
 import { cached, invalidate, statusCacheKey, recordCacheKey } from "./cache.js";
 import { buildGs1DigitalLinkUri } from "./gs1.js";
+import { syncProgramResolverEntry } from "./resolver.js";
 import { hasServiceToken, requireServiceToken, verifyPassword } from "./auth.js";
 import { initDb, getRegistrarHash, listPrograms, insertProgram, upsertStudent, setStudentActive, listStudents, listStudentsWithDetails, upsertEnrollmentDetails, getEnrollmentDetails, insertClaim, listClaims, type StudentIndexRow, type StudentWithDetailsRow } from "./db.js";
 
@@ -382,6 +383,14 @@ app.post<{ Body: CreateProgramBody }>("/programs", async (request, reply) => {
   const { code, name } = request.body;
   if (!code || !name) {
     return reply.code(400).send({ error: "code and name are required" });
+  }
+  if (!/^\d{14}$/.test(code)) {
+    return reply.code(400).send({ error: "code must be 14 digits" });
+  }
+  try {
+    await syncProgramResolverEntry(code, name);
+  } catch (error) {
+    return reply.code(502).send({ error: `Resolver entry could not be created: ${error instanceof Error ? error.message : String(error)}` });
   }
   await insertProgram(code, name);
   return reply.send({ code, name });
