@@ -39,12 +39,17 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="shell login-shell">
-      <p className="eyebrow">CampusPass</p>
-      <h1>Student Affairs Portal</h1>
-      <p>Sign in with your registrar account.</p>
-
-      <form className="card" onSubmit={handleSubmit}>
+    <main className="login-wrap">
+      <form className="card login-card" onSubmit={handleSubmit}>
+        <div className="logo">
+          <span className="logo-mark" />
+          <div>
+            <div className="logo-name">CampusPass</div>
+            <div className="logo-sub">Student affairs</div>
+          </div>
+        </div>
+        <h1 className="login-title">Student Affairs Portal</h1>
+        <p>Sign in with your registrar account.</p>
         <div className="field">
           <label htmlFor="username">Username</label>
           <input
@@ -72,7 +77,7 @@ export default function LoginPage() {
         <button className="btn" type="submit" disabled={submitting || !username || !password}>
           {submitting ? "Signing in…" : "Sign in"}
         </button>
-        {error && <p className="error-text" style={{ marginTop: 12 }}>{error}</p>}
+        {error && <p className="error-text">{error}</p>}
       </form>
     </main>
   );
