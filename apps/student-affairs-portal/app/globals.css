@@ -177,6 +177,81 @@ p {
   padding: 20px;
 }
 
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.menu-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(57, 57, 57, 0.35);
+  z-index: 9;
+}
+
+@media (max-width: 1024px) {
+  .sidebar {
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    z-index: 20;
+  }
+
+  .sidebar.open {
+    transform: none;
+  }
+
+  .main {
+    margin-left: 0;
+  }
+
+  .menu-toggle {
+    display: inline-flex;
+  }
+}
+
+@media (max-width: 640px) {
+  .content {
+    padding: 12px;
+  }
+
+  .card {
+    padding: 16px;
+  }
+
+  .topbar {
+    padding: 0 16px;
+  }
+
+  .topbar-user {
+    display: none;
+  }
+
+  .page-title {
+    font-size: 18px;
+  }
+
+  .card-header {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+}
+
 /* Cards */
 .card {
   background: var(--surface);

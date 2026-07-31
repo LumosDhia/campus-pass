@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 // Lucide paths, 24px viewBox rendered at 18px, stroke 1.75.
 const ICONS = {
@@ -27,6 +27,13 @@ const ICONS = {
       <path d="M21.42 10.922a1 1 0 0 0-.019-1.838L12.83 5.18a2 2 0 0 0-1.66 0L2.6 9.08a1 1 0 0 0 0 1.832l8.57 3.908a2 2 0 0 0 1.66 0z" />
       <path d="M22 10v6" />
       <path d="M6 12.5V16a6 3 0 0 0 12 0v-3.5" />
+    </>
+  ),
+  menu: (
+    <>
+      <line x1="3" x2="21" y1="6" y2="6" />
+      <line x1="3" x2="21" y1="12" y2="12" />
+      <line x1="3" x2="21" y1="18" y2="18" />
     </>
   ),
   logout: (
@@ -77,6 +84,7 @@ const NAV = [
 
 export function Shell({ title, username, children }: { title: string; username: string; children: ReactNode }) {
   const pathname = usePathname();
+  const [menuOpen, setMenuOpen] = useState(false);
 
   async function signOut() {
     await fetch("/api/logout", { method: "POST" });
@@ -85,7 +93,8 @@ export function Shell({ title, username, children }: { title: string; username: 
 
   return (
     <div className="frame">
-      <aside className="sidebar">
+      {menuOpen && <div className="backdrop" onClick={() => setMenuOpen(false)} />}
+      <aside className={`sidebar${menuOpen ? " open" : ""}`}>
         <div className="logo">
           <span className="logo-mark" />
           <div>
@@ -95,7 +104,12 @@ export function Shell({ title, username, children }: { title: string; username: 
         </div>
         <nav className="nav">
           {NAV.map((item) => (
-            <Link key={item.href} href={item.href} className={`nav-item${pathname === item.href ? " active" : ""}`}>
+            <Link
+              key={item.href}
+              href={item.href}
+              className={`nav-item${pathname === item.href ? " active" : ""}`}
+              onClick={() => setMenuOpen(false)}
+            >
               <Icon name={item.icon} />
               {item.label}
             </Link>
@@ -111,7 +125,17 @@ export function Shell({ title, username, children }: { title: string; username: 
       </aside>
       <div className="main">
         <header className="topbar">
-          <h1 className="page-title">{title}</h1>
+          <div className="topbar-left">
+            <button
+              type="button"
+              className="menu-toggle"
+              aria-label="Toggle navigation"
+              onClick={() => setMenuOpen((open) => !open)}
+            >
+              <Icon name="menu" />
+            </button>
+            <h1 className="page-title">{title}</h1>
+          </div>
           <div className="topbar-right">
             {username && <span className="topbar-user">{username}</span>}
             <button type="button" className="btn btn-outline btn-sm" onClick={signOut}>
