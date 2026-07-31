@@ -49,9 +49,14 @@ p {
 }
 
 .shell {
-  max-width: 760px;
+  max-width: 900px;
   margin: 0 auto;
   padding: 48px 20px 96px;
+}
+
+/* The login form is two fields; the dashboard needs the wider shell for the roster. */
+.login-shell {
+  max-width: 420px;
 }
 
 .row {
@@ -222,10 +227,20 @@ p {
   margin: 28px 0 10px;
 }
 
+.table-scroll {
+  overflow-x: auto;
+}
+
 table {
   width: 100%;
+  min-width: 680px;
   border-collapse: collapse;
   font-size: 13px;
+}
+
+.table-scroll td.mono,
+.table-scroll th {
+  white-space: nowrap;
 }
 
 th,

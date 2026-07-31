@@ -39,7 +39,7 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="shell">
+    <main className="shell login-shell">
       <p className="eyebrow">CampusPass</p>
       <h1>Student Affairs Portal</h1>
       <p>Sign in with your registrar account.</p>

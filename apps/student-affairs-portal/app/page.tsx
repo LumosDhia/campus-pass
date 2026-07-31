@@ -418,7 +418,7 @@ export default function DashboardPage() {
       </form>
 
       <p className="section-title">Roster</p>
-      <div className="card">
+      <div className="card table-scroll">
         {rosterLoading && <p className="muted">Loading…</p>}
         {!rosterLoading && roster.length === 0 && <p className="muted">No students enrolled yet.</p>}
         {roster.length > 0 && (
