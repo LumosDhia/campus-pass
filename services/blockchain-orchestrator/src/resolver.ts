@@ -1,6 +1,6 @@
 // Template for the GS1 Resolver documents of one program. The resolver's
 // POST /new is not an upsert across the base + serialized pair, so we delete
-// the anchor first (same reasoning as the old ops/resolver-entries/load.sh).
+// the anchor first (the old hand-run loader did the same).
 export async function syncProgramResolverEntry(code: string, name: string): Promise<void> {
   const apiUrl = process.env.RESOLVER_API_URL ?? "http://localhost:8090/api";
   const token = process.env.RESOLVER_SESSION_TOKEN ?? "secret";

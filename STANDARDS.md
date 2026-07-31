@@ -31,12 +31,17 @@
   string for anything that ends up in a JWT claim — derive identity from the chain (`ownerOf`) and
   permissions from a server-side lookup. See the 2026-09-02 DECISIONS.md entries; this was a real
   gap that got fixed once, don't reintroduce it.
-- When authoring `services/resolver` link entries for a serialized identifier: declare a
-  `"qualifiers": [{"21": "{name}"}]` template on that entry and use `{name}` in the href, alongside
-  a separate unqualified base entry — same anchor, two array entries, mirroring GS1's own test
-  fixtures. Skipping the qualifier template is what caused the crash this audit found and patched
-  (DECISIONS.md); the crash itself is now fixed too, but a document with no matching qualifier
-  entry still correctly 404s rather than resolving — so it still won't work without one.
+- Resolver entries come from `services/blockchain-orchestrator/src/resolver.ts`, not hand-authored files.
+  It declares a `"qualifiers": [{"21": "{studentId}"}]` template on the serialized entry and uses
+  `{studentId}` in the href, alongside a separate unqualified base entry (same anchor, two
+  documents), mirroring GS1's own test fixtures. Skipping the qualifier template is what caused the
+  crash found in the audit (DECISIONS.md): a document with no matching qualifier entry 404s.
+- `Person` metadata pinned to IPFS: `name` must equal `serial` and there must be no `description`.
+  The orchestrator rejects anything else with 400.
+- Orchestrator write endpoints (`POST/PUT/PATCH/DELETE`) require the service token
+  (`ORCHESTRATOR_API_TOKEN`). Browsers never hold it; the portal's server proxy sends it.
+- PII (names, emails, registrar notes) only ever goes in the `enrollment_details` table, never in
+  IPFS metadata, on-chain data or public responses.
 - Don't assume a service "works" because it's vendored and copied over — `services/resolver` sat
   unrun for an entire session before this audit actually started it and found it was misconfigured
   (`.env` vs `.env.example`) and buggy. Actually run everything before claiming it's done.
