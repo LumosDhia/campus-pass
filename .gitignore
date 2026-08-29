@@ -1,0 +1,31 @@
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Dependencies & build output
+node_modules/
+dist/
+.next/
+build/
+.pnpm-store/
+
+# Env & secrets
+.env
+.env.local
+**/keys/*.pem
+
+# Hardhat
+contracts/cache/
+contracts/artifacts/
+contracts/typechain-types/
+
+coverage/
+*.log
+
+# Video generation (large binaries — see video/README.md to rebuild)
+video/.venv/
+video/models/
+video/audio/
+video/output.mp4
+__pycache__/

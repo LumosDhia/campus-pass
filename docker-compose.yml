@@ -1,0 +1,33 @@
+name: campus-pass
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: campus_pass
+      POSTGRES_PASSWORD: campus_pass
+      POSTGRES_DB: campus_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  ipfs:
+    image: ipfs/kubo:latest
+    ports:
+      - "5001:5001" # HTTP API — used by the blockchain-orchestrator
+      - "8081:8080" # Gateway — browse pinned content at http://localhost:8081/ipfs/<cid>
+    volumes:
+      - ipfs_data:/data/ipfs
+
+volumes:
+  postgres_data:
+  redis_data:
+  ipfs_data:

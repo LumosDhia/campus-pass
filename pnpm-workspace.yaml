@@ -1,0 +1,10 @@
+packages:
+  - "services/auth-service"
+  - "services/blockchain-orchestrator"
+  - "apps/*"
+  - "packages/*"
+  - "contracts"
+allowBuilds:
+  esbuild: true
+  keccak: true
+  secp256k1: true
