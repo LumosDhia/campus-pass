@@ -1,0 +1,55 @@
+services:
+  database-service:
+    build: './database_server'
+    container_name: database-server
+    restart: always
+    env_file:
+      - .env.example
+    ports:
+      - "27017:27017"
+    volumes:
+      - resolver-database-volume:/data/db
+    networks:
+      - resolver-internal-network
+
+  data-entry-service:
+    build: './data_entry_server'
+    container_name: data-entry-server
+    env_file:
+      - .env.example
+    depends_on:
+      - database-service
+    restart: always
+    networks:
+      - resolver-internal-network
+
+  web-service:
+    build: './web_server'
+    container_name: resolver-web-server
+    environment:
+      - MONGO_URI=${MONGO_URI}
+    depends_on:
+      - database-service
+    restart: always
+    networks:
+      - resolver-internal-network
+
+  frontend-proxy-service:
+    build: './frontend_proxy_server'
+    container_name: frontend-proxy-server
+    depends_on:
+      - web-service
+      - data-entry-service
+    restart: always
+    ports:
+      - "8090:80"
+    networks:
+      - resolver-internal-network
+
+
+volumes:
+  resolver-database-volume: {}
+
+networks:
+  resolver-internal-network:
+    name: resolver-internal-network

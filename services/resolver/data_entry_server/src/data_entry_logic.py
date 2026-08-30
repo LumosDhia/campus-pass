@@ -1,0 +1,670 @@
+import logging
+import re
+import subprocess
+from typing import Any
+
+import data_entry_db
+
+logger = logging.getLogger(__name__)
+
+# Pattern for validating GS1 AI data strings before passing to subprocess
+_GS1_AI_DATA_PATTERN = re.compile(r'^[\w()./:%-]+$')
+
+
+def _call_gs1_toolkit(ai_data_string: str) -> bool:
+    global process
+    if not _GS1_AI_DATA_PATTERN.match(ai_data_string):
+        logger.warning("_call_gs1_toolkit: rejected unsafe input: %s", ai_data_string)
+        return False
+
+    node_path = "/usr/bin/node"
+    toolkit_path = "/app/gs1-digitallink-toolkit/callGS1encoder.js"
+
+    try:
+        process = subprocess.Popen([node_path, toolkit_path, ai_data_string],
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+
+        stdout, stderr = process.communicate(timeout=10)
+
+        if process.returncode != 0:
+            logger.warning("_call_gs1_toolkit error: %s", stderr.decode('utf-8'))
+            return False
+
+        return True
+
+    except subprocess.TimeoutExpired:
+        process.kill()
+        logger.error("_call_gs1_toolkit: subprocess timed out for input: %s", ai_data_string)
+        return False
+    except Exception as e:
+        logger.error("_call_gs1_toolkit: unexpected error: %s", e)
+        return False
+
+
+def _test_gs1_digital_link_syntax(url: str) -> bool:
+    # To do this we make a command line call to the GS1 Digital Link Validator at
+    # /app/gs1-digitallink-toolkit/callGS1encoder.js and pass the URL as an ai data string parameter.
+    # For example /01/09521234543213/10/LOT/21/SERIAL becomes
+    # (01)09521234543213(10)LOT(21)SERIAL
+    # We then call the toolkit and return the true/false result.
+    try:
+        url_parts = url.split('/')
+        # add the identifier
+        ai_data_string = f"({url_parts[1]}){url_parts[2]}"
+
+        # add the qualifiers (up to three - CPV, LOT and SERIAL for GTINs, or GLNX for GLNs)
+        if len(url_parts) > 3:
+            for i in range(3, len(url_parts), 2):
+                ai_data_string += f"({url_parts[i]}){url_parts[i + 1]}"
+
+        # call the toolkit
+        return _call_gs1_toolkit(ai_data_string)
+
+    except (IndexError, TypeError) as e:
+        logger.warning("_test_gs1_digital_link_syntax: malformed URL %s: %s", url, e)
+        return False
+
+
+def _validate_data(data: dict[str, Any]) -> dict[str, Any]:
+    # TODO - Implement data validation using calls to your own applications where necessary.
+    #        For example, you may wish to ensure a product with matching GTIN exists in your product database,
+    #        or confirm that the 'href' web location exists and is accessible.
+    #        Simply adjust the validation logic as needed to fit your specific requirements and return
+    #        the data object (adjusted if necessary) or add Exception Throw logic to stop data entry of this document.
+    #        By default, the document is returned unchanged.
+    return data
+
+
+def _convert_v2_to_v3(data_entry_v2_doc: dict[str, Any]) -> dict[str, Any]:
+    rec_v3 = {
+        'anchor': "/" + data_entry_v2_doc['identificationKeyType'] + "/" + data_entry_v2_doc['identificationKey'],
+        'itemDescription': data_entry_v2_doc['itemDescription'],
+        'defaultLinktype': '',
+        'qualifiers': [],
+        'links': []
+    }
+    if 'qualifierPath' in data_entry_v2_doc and data_entry_v2_doc['qualifierPath'] != '/':
+        key_pairs = data_entry_v2_doc['qualifierPath'][1:].split('/')
+        rec_v3['qualifiers'] = [{key_pairs[i]: key_pairs[i + 1]} for i in range(0, len(key_pairs), 2)]
+    else:
+        del rec_v3['qualifiers']
+
+    logger.info('There are %d responses to process', len(data_entry_v2_doc['responses']))
+    for response in data_entry_v2_doc['responses']:
+        link = {
+            'linktype': response['linkType'],
+            'href': response['targetUrl'],
+            'title': response['linkTitle'],
+            'type': response['mimeType']
+        }
+
+        # This statement deals with the fact that GS1 Global Office Resolver data entry v2 format uses
+        # 'language' and 'public' whereas the Resolver CE v2 format uses 'ianaLanguage' and 'active'.
+        if 'language' in response:
+            link['public'] = True
+            link['hreflang'] = [response['language']]
+        else:
+            link['active'] = True
+            link['hreflang'] = [response['ianaLanguage']]
+
+        if 'context' in response and isinstance(response['context'], list):
+            link['context'] = response['context']
+
+        if 'defaultLinkType' in response:
+            rec_v3['defaultLinktype'] = response['linkType']
+
+        # Now we must see if rec_v3['links'] already has a link with the same linktype and the same href.
+        # If so, we must append the hreflang to the hreflang list in that existing link.
+        # If not, we must append the link to rec_v3['links'].
+        found = False
+        for link_existing in rec_v3['links']:
+            if link_existing['linktype'] == link['linktype'] and link_existing['href'] == link['href']:
+                # first make sure that the language is not already in the list
+                if response['language'] not in link_existing['hreflang']:
+                    link_existing['hreflang'].append(response['language'])
+                found = True
+                break
+
+        if not found:
+            rec_v3['links'].append(link)
+
+    return rec_v3
+
+
+# Transforms the provided mongo linkset format into the more compact Resolver CE v3 data entry format.
+def _convert_mongo_linkset_to_v3(mongo_linkset_format: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """
+    Transforms the provided mongo linkset format into the more compact Resolver CE v3 data entry format.
+    """
+    try:
+        output_items = []
+
+        for item in mongo_linkset_format['data']:
+            output_item = {
+                'anchor': "/" + mongo_linkset_format['_id'].replace('_', '/'),
+                'itemDescription': '',
+                'defaultLinktype': mongo_linkset_format['defaultLinktype'],
+                'links': []
+            }
+
+            if 'qualifiers' in item:
+                qualifiers = item['qualifiers']
+            else:
+                qualifiers = None
+
+            for linkset in item['linkset']:
+                for key in linkset:
+                    if key.startswith(
+                            'https://gs1.org/voc/') and key != 'https://gs1.org/voc/defaultLink' and key != 'https://gs1.org/voc/defaultLinkMulti':
+                        linktype = 'gs1:' + key.split('/')[-1]
+                        output_item['itemDescription'] = linkset['itemDescription']
+
+                        # qualifiers are optional
+                        if qualifiers is not None and qualifiers != []:
+                            output_item['qualifiers'] = qualifiers
+
+                        for link in linkset[key]:
+                            if 'context' in link:
+                                context = link['context']
+                            else:
+                                context = []
+
+                            output_link = {
+                                'linktype': linktype,
+                                'href': link['href'],
+                                'title': link['title'],
+                                'type': link['type'],
+                                'hreflang': link['hreflang'],
+                            }
+
+                            # context is optional
+                            if context is not None and context != []:
+                                output_link['context'] = context
+
+                            output_item['links'].append(output_link)
+
+                output_items.append(output_item)
+
+        return output_items
+
+
+    except KeyError as key_error:
+        logger.error('Missing key during conversion: %s', key_error)
+        return None
+    except ValueError as value_error:
+        logger.error('Type error occurred: %s', value_error)
+        return None
+    except Exception as e:
+        logger.error('Unexpected error during conversion: %s', e)
+        return None
+
+
+def _author_db_linkset_document(data_entry_format: dict[str, Any]) -> dict[str, Any]:
+    try:
+        # First we must check if this a v2 or v3 document, and convert it to v3 if it's v2
+        if 'identificationKeyType' in data_entry_format:
+            logger.info('Converting v2 to v3')
+            data_entry_format = _convert_v2_to_v3(data_entry_format)
+        elif 'anchor' in data_entry_format:
+            logger.debug('Document is already in v3 format')
+        else:
+            return {"response_status": 400, "error": "Invalid data format: " + str(data_entry_format)}
+
+        default_linktype = data_entry_format['defaultLinktype']
+
+        doc_id = convert_path_to_document_id( data_entry_format["anchor"])
+
+        database_doc = {
+            "_id": doc_id,
+            "defaultLinktype": default_linktype,
+            "data": []
+        }
+
+        data = {
+            "qualifiers": [],
+            "linkset": []
+        }
+
+        if "qualifiers" in data_entry_format:
+            data["qualifiers"] = data_entry_format["qualifiers"]
+
+        # Now we construct the linkset object
+        linkset_obj = {}
+
+        for link in data_entry_format["links"]:
+            linktype = "https://gs1.org/voc/" + link["linktype"].split(':')[1]
+            if linktype not in linkset_obj:
+                linkset_obj[linktype] = []
+
+            linkset_entry = {
+                "href": link["href"],
+                "title": link["title"],
+                "type": link.get("type"),
+                "hreflang": link.get("hreflang"),
+            }
+            if "context" in link:
+                linkset_entry["context"] = link["context"]
+
+            linkset_obj[linktype].append(linkset_entry)
+
+            # Check is this linktype is the default linktype:
+            if default_linktype == link['linktype']:
+                # If we are dealing with multiple languages, append 'defaultLinkMulti' to the linkset_obj
+                if isinstance(linkset_entry['hreflang'], list) and len(linkset_entry['hreflang']) > 1:
+                    linkset_obj['https://gs1.org/voc/defaultLinkMulti'] = linkset_entry
+
+                # In any case we append 'defaultLink' to the linkset_obj with only linktype, href and title
+                linkset_obj['defaultLink'] = {
+                    "href": link['href'],
+                    "title": link['title']
+                }
+
+        # finally we re-arrange 'defaultLink' to be the first element in the list and
+        # defaultLinkMulti to be the second element in the list:
+        rearranged_linkset_obj = {
+            "anchor": data_entry_format["anchor"],
+            "itemDescription": data_entry_format["itemDescription"],
+            'https://gs1.org/voc/defaultLink': linkset_obj['defaultLink']
+        }
+        if 'defaultLinkMulti' in linkset_obj:
+            rearranged_linkset_obj['defaultLinkMulti'] = linkset_obj['defaultLinkMulti']
+
+        for key in linkset_obj:
+            if key not in ['defaultLink', 'defaultLinkMulti']:
+                rearranged_linkset_obj[key] = linkset_obj[key]
+
+        linkset_obj = rearranged_linkset_obj
+        data["linkset"].append(linkset_obj)
+
+        database_doc["data"].append(data)
+
+        return {"response_status": 200, "data": database_doc}
+
+    except KeyError as key_error:
+        logger.error('Missing key during conversion: %s', key_error)
+        return {"response_status": 400, "error": f'Missing key during conversion: {key_error}'}
+
+    except Exception as e:
+        logger.error('_author_linkset_document: Error processing document: %s', e, exc_info=True)
+        return {"response_status": 500, "error": "Internal Server Error - " + str(e)}
+
+
+def _do_qualifiers_match(qualifiers1: list[dict[str, str]], qualifiers2: list[dict[str, str]]) -> bool:
+    # qualifiers are lists in the document with up to three sets of AI codes and values:
+    #      [{'aiCode1': 'aiValue1'}, {'aiCode2': 'value2'}{'aiCode2': 'value2'}
+    # They may be in a different order, so we need to check for a match.
+    # Are they the same length?
+    if len(qualifiers1) != len(qualifiers2):
+        return False
+
+    # Loop through each qualifier - are the qualifiers the same?
+    for qualifier1 in qualifiers1:
+        if qualifier1 not in qualifiers2:
+            return False
+
+    return True
+
+
+# Process the document for insertion or update in the database
+def _process_document_upsert(authored_doc: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    try:
+        # Convert the incoming dictionary date entry item to a linkset-style document ("authored_doc")
+
+        # Try to read the document from the database
+        read_result = data_entry_db.read_document(authored_doc['_id'])
+
+        # Document already exists with the id
+        if read_result["response_status"] == 200:
+            logger.info('Document already exists in database: %s', authored_doc['_id'])
+
+            # Get the document from the read_result
+            existing_db_document = read_result["data"]
+
+            # Iterate through each key-value pair in the authored_doc
+            for entry in authored_doc['data']:
+                # each entry consists of qualifiers and linkset
+                # what we need to do is to see if there is a match in the qualifiers, bearing in mind that the
+                # qualifiers may be in a different order
+                # if there is a match, we need to update the linkset
+                # if there is no match, we need to add the entry to the document
+                # First match the qualifiers:
+                found = False
+                for existing_db_entry in existing_db_document['data']:
+                    if _do_qualifiers_match(existing_db_entry['qualifiers'], entry['qualifiers']):
+                        # If the qualifiers match, merge the linkset by (linktype, hreflang,
+                        # context) — the same uniqueness key update_document (PUT) already
+                        # uses via _find_matching_link. A blind .extend() here (the previous
+                        # behavior) duplicated every link on each repeat POST /new for the
+                        # same anchor, since re-submitting identical data always "matched"
+                        # on qualifiers and then appended anyway.
+                        for new_link in entry['linkset']:
+                            idx = _find_matching_link(existing_db_entry['linkset'], new_link)
+                            if idx is not None:
+                                existing_db_entry['linkset'][idx].update(new_link)
+                            else:
+                                existing_db_entry['linkset'].append(new_link)
+                        found = True
+                        break
+
+                if not found:
+                    # If the qualifiers don't match, add the entry to the document
+                    existing_db_document['data'].append(entry)
+
+                update_result = data_entry_db.update_document(existing_db_document)
+
+                # Build the result entry and return it along with update status 200 (as the doc was updated)
+                return {"entry": authored_doc['_id'], "qualifiers": entry['qualifiers'], "result": update_result}, 200
+
+        # Document doesn't exist, so we create it
+        elif read_result["response_status"] == 404:
+            logger.info('Document does not exist: %s', authored_doc['_id'])
+
+            # Perform the document creation in the database
+            create_result = data_entry_db.create_document(authored_doc)
+
+            # Build the result entry and return it along with creation status 201
+            return {"entry": authored_doc['_id'], "result": create_result}, 201
+
+        # If response status is neither 200 nor 404, return the read_result and its status
+        else:
+            return read_result, read_result["response_status"]
+
+    except Exception as e:
+        logger.error('_process_document_insert: Error processing document: %s', e, exc_info=True)
+        return {"response_status": 500, "error": "Internal Server Error - " + str(e)}, 500
+
+
+def _author_db_linkset_list(data_list: list[dict[str, Any]]) -> dict[str, Any]:
+    try:
+        transformed_data_list = []
+        for data in data_list:
+            linkset_result = _author_db_linkset_document(data)
+
+            if linkset_result['response_status'] != 200:
+                # If there's an error, return the linkset_result which contains the error status and message
+                return linkset_result
+
+            else:
+                linkset_doc = linkset_result['data']
+
+                # Now we check if there is already a document with the same '_id' in the transformed_data_list
+                # If there is, we append the 'data' list to the existing document
+                # If there isn't, we append the document to the transformed_data_list
+                found = False
+                for transformed_data in transformed_data_list:
+                    if transformed_data['_id'] == linkset_doc['_id']:
+                        transformed_data['data'].extend(linkset_doc['data'])
+                        found = True
+                        break
+                if not found:
+                    transformed_data_list.append(linkset_doc)
+
+        return {"response_status": 200, "data": transformed_data_list}
+
+    except Exception as e:
+        logger.error('_author_mongo_linkset_list: Error processing document: %s', e)
+        return {"response_status": 500, "error": "Internal Server Error - " + str(e)}
+
+def convert_path_to_document_id(path: str) -> str:
+    if path.count('/') < 2:
+        logger.warning("Error: path format error for: %s", path)
+        raise ValueError("Error: path format error")
+
+    parts = path.strip().split('/')
+    parts = [p for p in parts if p != '']
+
+    return '_'.join(parts)
+
+
+def create_document(data: dict[str, Any] | list[dict[str, Any]]) -> tuple[dict[str, Any] | list[dict[str, Any]], int]:
+    try:
+        # If 'data' is a list
+        if isinstance(data, list):
+            logger.info('Processing list of %d items', len(data))
+            create_results_list = []  # Initialize a list to store results
+
+            authored_db_linkset_result = _author_db_linkset_list(data)
+
+            if authored_db_linkset_result['response_status'] != 200:
+                return authored_db_linkset_result, authored_db_linkset_result['response_status']
+
+            else:
+                authored_db_linkset_docs = authored_db_linkset_result['data']
+
+                # Iterate over each item in the data list
+                for item in authored_db_linkset_docs:
+                    logger.info('Processing item: %s', item['_id'])
+                    validated_doc = _validate_data(item)
+
+                    # Use upsert: if the document exists its linksets are merged;
+                    # if it does not exist a new document is created.  This is the
+                    # same behaviour as the single-item (dict) path and avoids the
+                    # data-loss / race-condition issues of DELETE + CREATE.
+                    create_result, status = _process_document_upsert(validated_doc)
+                    logger.info('Result: %s Status: %s', create_result, status)
+
+                    # Append the result to the results list
+                    create_results_list.append(create_result)
+
+                # Once all items have been processed, return the total result list and the successful status 201
+                return create_results_list, 201
+
+            # If 'data' is a dictionary (i.e., a single entry and not a list)
+        elif isinstance(data, dict):
+            authored_linkset_doc = _author_db_linkset_document(data)
+            validated_doc = _validate_data(authored_linkset_doc)
+
+            # Process the single 'data' entry for insertion using the helper function and get the result and status
+            create_result, status = _process_document_upsert(validated_doc['data'])
+            return create_result, status  # Return the result and status
+
+        # If 'data' is not a list nor a dictionary, return an error response.
+        else:
+            return {"response_status": 400, "error": "Invalid data format: " + str(data)}
+
+    except Exception as e:
+        # If there's any exception during processing, return a server error response
+        return {"response_status": 500, "error": "Internal Server Error - " + str(e)}
+
+
+def read_document(document_id: str) -> dict[str, Any]:
+    try:
+        # get the document from the database
+        result = data_entry_db.read_document(document_id)
+
+        # If found in the database, convert the document to the v3 format.
+        # If not found, return the result as is (with the 404 status)
+        if result['response_status'] == 200:
+            result['data'] = _convert_mongo_linkset_to_v3(result['data'])
+
+        return result
+
+    except Exception as e:
+        return {"response_status": 500, "error": "Internal Server Error"}
+
+
+def read_index() -> dict[str, Any]:
+    try:
+        # get the document index from the database
+        result = data_entry_db.read_index()
+
+        if result['response_status'] == 200:
+            # format the list to include the '/' at the beginning and replace the '_' with '/'
+            formatted_list = []
+            for item in result['data']:
+                formatted_list.append('/{}'.format(item.replace('_', '/')))
+            result['data'] = formatted_list
+
+        return result
+
+    except Exception as e:
+        return {"response_status": 500, "error": "Internal Server Error"}
+
+
+def _find_matching_link(existing_links: list[dict[str, Any]], new_link: dict[str, Any]) -> int | None:
+    """
+    Find the index of an existing link that matches new_link by the
+    uniqueness key (linktype, hreflang, context).
+    Returns the index or None.
+    """
+    new_linktype = new_link.get('linktype', '')
+    new_hreflang = sorted(new_link.get('hreflang', []))
+    new_context = sorted(new_link.get('context', []))
+
+    for i, existing in enumerate(existing_links):
+        if (existing.get('linktype', '') == new_linktype and
+                sorted(existing.get('hreflang', [])) == new_hreflang and
+                sorted(existing.get('context', [])) == new_context):
+            return i
+
+    return None
+
+
+def update_document(document_id: str, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """
+    Idempotent update of an existing document.
+    - Returns 404 if the document does not exist.
+    - Preserves fields not present in the payload.
+    - Merges links: matches by (linktype, hreflang, context).
+      Matching links are updated; unmatched links are added.
+    """
+    try:
+        # 1. Read the existing document
+        read_result = data_entry_db.read_document(document_id)
+        if read_result['response_status'] != 200:
+            return {"response_status": 404, "error": f"Document not found: {document_id}"}, 404
+
+        existing_db_doc = read_result['data']
+
+        # 2. Convert existing DB document to v3 format
+        existing_v3_list = _convert_mongo_linkset_to_v3(existing_db_doc)
+        if not existing_v3_list:
+            return {"response_status": 500, "error": "Failed to convert existing document"}, 500
+
+        # 3. Find the matching v3 item by qualifiers (default: no qualifiers)
+        payload_qualifiers = data.get('qualifiers', [])
+        matched_idx = 0
+        for i, v3_item in enumerate(existing_v3_list):
+            if _do_qualifiers_match(v3_item.get('qualifiers', []), payload_qualifiers):
+                matched_idx = i
+                break
+
+        matched_v3 = existing_v3_list[matched_idx]
+
+        # 4. Merge top-level scalar fields (preserve if absent from payload)
+        for field in ['itemDescription', 'defaultLinktype']:
+            if field in data:
+                matched_v3[field] = data[field]
+
+        # 5. Merge links
+        if 'links' in data:
+            existing_links = matched_v3.get('links', [])
+            for new_link in data['links']:
+                idx = _find_matching_link(existing_links, new_link)
+                if idx is not None:
+                    existing_links[idx].update(new_link)
+                else:
+                    existing_links.append(new_link)
+            matched_v3['links'] = existing_links
+
+        # 6. Convert merged v3 item back to DB format
+        authored_result = _author_db_linkset_document(matched_v3)
+        if authored_result['response_status'] != 200:
+            return authored_result, authored_result['response_status']
+
+        new_data_entry = authored_result['data']['data'][0]
+
+        # 7. Replace only the matched data entry; preserve other entries
+        existing_db_doc['data'][matched_idx] = new_data_entry
+
+        # Update top-level defaultLinktype if payload changed it
+        if 'defaultLinktype' in data:
+            existing_db_doc['defaultLinktype'] = data['defaultLinktype']
+
+        # 8. Persist
+        update_result = data_entry_db.update_document(existing_db_doc)
+        if update_result['response_status'] == 200:
+            return {"entry": document_id, "result": update_result}, 200
+        else:
+            return update_result, update_result['response_status']
+
+    except Exception as e:
+        logger.error('update_document: Error: %s', e, exc_info=True)
+        return {"response_status": 500, "error": f"Internal Server Error - {str(e)}"}, 500
+
+
+def delete_links(document_id: str, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """
+    Remove specific links from an existing document.
+    Links are matched by the uniqueness key (linktype, hreflang, context).
+    Returns 404 if the document does not exist.
+    Returns 404 if none of the requested links were found in the document.
+    """
+    try:
+        # 1. Read existing document
+        read_result = data_entry_db.read_document(document_id)
+        if read_result['response_status'] != 200:
+            return {"response_status": 404, "error": f"Document not found: {document_id}"}, 404
+
+        existing_db_doc = read_result['data']
+
+        # 2. Convert to v3
+        existing_v3_list = _convert_mongo_linkset_to_v3(existing_db_doc)
+        if not existing_v3_list:
+            return {"response_status": 500, "error": "Failed to convert existing document"}, 500
+
+        # 3. Find matching v3 item by qualifiers
+        payload_qualifiers = data.get('qualifiers', [])
+        matched_idx = 0
+        for i, v3_item in enumerate(existing_v3_list):
+            if _do_qualifiers_match(v3_item.get('qualifiers', []), payload_qualifiers):
+                matched_idx = i
+                break
+
+        matched_v3 = existing_v3_list[matched_idx]
+
+        # 4. Remove matching links
+        existing_links = matched_v3.get('links', [])
+        removed_count = 0
+        if 'links' in data:
+            for link_to_remove in data['links']:
+                idx = _find_matching_link(existing_links, link_to_remove)
+                if idx is not None:
+                    existing_links.pop(idx)
+                    removed_count += 1
+
+        if removed_count == 0:
+            return {"response_status": 404, "error": "No matching links found to delete"}, 404
+
+        matched_v3['links'] = existing_links
+
+        # 5. Convert merged v3 back to DB format
+        authored_result = _author_db_linkset_document(matched_v3)
+        if authored_result['response_status'] != 200:
+            return authored_result, authored_result['response_status']
+
+        new_data_entry = authored_result['data']['data'][0]
+
+        # 6. Replace the matched data entry in the existing DB document
+        existing_db_doc['data'][matched_idx] = new_data_entry
+
+        # 7. Persist
+        update_result = data_entry_db.update_document(existing_db_doc)
+        if update_result['response_status'] == 200:
+            return {"entry": document_id, "removed": removed_count, "result": update_result}, 200
+        else:
+            return update_result, update_result['response_status']
+
+    except Exception as e:
+        logger.error('delete_links: Error: %s', e, exc_info=True)
+        return {"response_status": 500, "error": f"Internal Server Error - {str(e)}"}, 500
+
+
+def delete_document(anchor: str) -> dict[str, Any]:
+    try:
+        result = data_entry_db.delete_document(anchor)
+        return result
+
+    except Exception as e:
+        return {"response_status": 500, "error": "Internal Server Error"}
